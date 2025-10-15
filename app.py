@@ -2,7 +2,6 @@ import streamlit as st
 import os
 import time
 import tempfile
-from dotenv import load_dotenv
 
 # LangChain components (same structure)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -21,8 +20,7 @@ from langchain_community.document_loaders import (
 )
 from langchain.schema import Document
 
-# Load .env if present
-load_dotenv()
+
 
 # ----------------------------
 # Streamlit UI
