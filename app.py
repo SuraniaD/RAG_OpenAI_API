@@ -18,11 +18,10 @@ from langchain.schema import Document
 
 # ---- Load .env if present
 load_dotenv()
-
 st.set_page_config(page_title="RAG Document Q&A — OpenAI", page_icon="📄")
 
 # ----------------------------
-# Sidebar: OpenAI settings
+# Sidebar: OpenAI settings + status
 # ----------------------------
 with st.sidebar:
     st.subheader("🔑 OpenAI Settings")
@@ -40,6 +39,12 @@ with st.sidebar:
         "Embedding Model",
         value=os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
     )
+
+    st.markdown("---")
+    if st.session_state.get("vectors_ready"):
+        st.success("✅ Vector Database is ready")
+    else:
+        st.info("ℹ️ Vector DB will be built on your first query")
 
 # Make sure OpenAI clients see the key
 if openai_api_key:
@@ -98,8 +103,33 @@ def load_docs_from_paths(file_paths):
             )
     return docs
 
+def ensure_vectors_built(uploaded_files, embed_model_name: str):
+    """
+    Build vector store if it doesn't exist yet. Called automatically on first query.
+    """
+    if "vectors" in st.session_state:
+        return True  # already built
+
+    if not uploaded_files:
+        # No files uploaded; can't build
+        return False
+
+    # Build fresh from current uploads
+    temp_dir, paths = save_uploads_to_temp_dir(uploaded_files)
+    raw_docs = load_docs_from_paths(paths)
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    final_docs = text_splitter.split_documents(raw_docs)
+
+    embeddings = OpenAIEmbeddings(model=embed_model_name)
+    st.session_state.vectors = FAISS.from_documents(final_docs, embeddings)
+    st.session_state.text_splitter = text_splitter
+    st.session_state.final_documents = final_docs
+    st.session_state.vectors_ready = True
+    return True
+
 # ----------------------------
-# Uploads & Build vectors (same flow)
+# Uploads (no URL option)
 # ----------------------------
 uploaded_files = st.file_uploader(
     "Upload documents (PDF/TXT/other common formats). Multiple allowed.",
@@ -107,37 +137,12 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-colA, colB = st.columns([1, 2])
-with colA:
-    if st.button("Document Embedding"):
-        if not uploaded_files:
-            st.warning("Please upload at least one document before embedding.")
-        else:
-            # Build embeddings + vectors (same structure)
-            # Always rebuild when pressed to reflect new uploads
-            temp_dir, paths = save_uploads_to_temp_dir(uploaded_files)
-            raw_docs = load_docs_from_paths(paths)
-
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            final_docs = text_splitter.split_documents(raw_docs)
-
-            embeddings = OpenAIEmbeddings(model=embed_model)
-            st.session_state.vectors = FAISS.from_documents(final_docs, embeddings)
-            st.session_state.text_splitter = text_splitter
-            st.session_state.final_documents = final_docs
-
-            st.success("Vector Database is ready")
-
-with colB:
-    st.caption("After embedding, ask questions in the chat below.")
-
 # ----------------------------
 # Chat state & rendering
 # ----------------------------
 if "chat" not in st.session_state:
     st.session_state.chat = []  # list of {"role": "user"/"assistant", "content": str}
 
-# Render history
 for m in st.session_state.chat:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
@@ -152,11 +157,12 @@ if user_prompt:
     with st.chat_message("user"):
         st.markdown(user_prompt)
 
-    # Answer
+    # Ensure vectors exist (auto-build on first query)
+    vectors_ok = ensure_vectors_built(uploaded_files, embed_model)
     with st.chat_message("assistant"):
-        if "vectors" not in st.session_state:
-            st.warning("Please click 'Document Embedding' after adding documents, then ask your question.")
-            assistant_text = "I need the vector index first. Please embed your documents."
+        if not vectors_ok:
+            st.warning("Please upload at least one document, then ask your question again.")
+            assistant_text = "I need documents to build the vector index. Upload files first."
             st.session_state.chat.append({"role": "assistant", "content": assistant_text})
         else:
             llm = ChatOpenAI(model=model_name, temperature=0)
@@ -168,18 +174,13 @@ if user_prompt:
             response = retrieval_chain.invoke({'input': user_prompt})
             elapsed = time.process_time() - start
 
-            answer = response.get('answer', '').strip()
-            if not answer:
-                answer = "_No answer returned._"
-
+            answer = response.get('answer', '').strip() or "_No answer returned._"
             st.markdown(answer)
             st.caption(f"_Response time: {elapsed:.2f}s_")
             st.session_state.chat.append({"role": "assistant", "content": answer})
 
-            # Similarity context for the latest answer
             with st.expander("Document similarity Search"):
-                ctx = response.get('context', [])
-                for i, doc in enumerate(ctx):
+                for doc in response.get('context', []):
                     st.write(doc.page_content)
                     st.write('------------------------')
 
